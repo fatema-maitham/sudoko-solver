@@ -1,37 +1,56 @@
-// ocr.js (FINAL FINAL)
-// Goal: stable + high accuracy OCR for Sudoku photos with light/blue grids.
-// Exposes: window.OCR = { openCropAndRead(file) }
+// ocr.js
+// -----------------------------------------------------------------------------
+// OCR Module for Sudoku Photos (Crop + Preprocess + Per-Cell Recognition)
+// -----------------------------------------------------------------------------
+// Exposes:
+//   window.OCR = { openCropAndRead(file) }
 //
-// Key upgrades vs basic OCR:
-// - More stable results: 1 worker (deterministic-ish)
-// - Strong preprocessing: grayscale + contrast + percentile threshold
-// - Per-cell cleanup: remove grid lines + clear borders + dilate digits
-// - Multi-variant per cell (A/B/C) and pick best confidence
-// - Sanitizes conflicts by dropping lowest-confidence digits
+// Responsibilities:
+// - Show a crop modal over the uploaded image
+// - Convert the crop area into a normalized square grid (1080x1080)
+// - Preprocess for light/blue grids (grayscale + contrast + percentile threshold)
+// - Split into 81 cells, clean per cell (grid-line removal + border clear + dilation)
+// - Run multiple OCR variants per cell (A/B/C) and keep the highest-confidence digit
+// - Drop low-confidence digits that create Sudoku conflicts (sanitizeConflicts)
+//
+// Notes:
+// - Uses Tesseract.js loaded via CDN (internet required)
+// - Uses 1 worker for stability/consistency
+// -----------------------------------------------------------------------------
 
 window.OCR = (() => {
+    // ---- Modal DOM helpers (queried lazily) ----
     const modal = () => document.getElementById("ocrModal");
     const canvasEl = () => document.getElementById("ocrCanvas");
     const btnUse = () => document.getElementById("ocrUse");
     const btnClose = () => document.getElementById("ocrClose");
 
+    // ---- Source image state ----
     let imgBitmap = null;
     let sourceW = 0, sourceH = 0;
+
+    // ---- View transform (image -> canvas placement) ----
     let viewScale = 1;
     let viewOffX = 0, viewOffY = 0;
 
-    // crop square in canvas coords
+    // Crop square in canvas coordinates
     let rect = { x: 40, y: 40, s: 300 };
     const HANDLE = 12;
 
-    let dragMode = null;
+    // Drag state for crop interactions
+    let dragMode = null; // "move" or corner key ("nw","ne","sw","se")
     let start = null;
 
+    // Prevent rebinding canvas pointer events
     let bound = false;
+
+    // Cache scheduler creation so we don’t recreate workers repeatedly
     let schedulerPromise = null;
 
+    // Clamp helper for safe bounds
     function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
+    // Create and configure Tesseract scheduler (1 worker for stable output)
     async function getScheduler() {
         if (!window.Tesseract) throw new Error("OCR needs internet (Tesseract CDN).");
         if (schedulerPromise) return schedulerPromise;
@@ -39,19 +58,21 @@ window.OCR = (() => {
         schedulerPromise = (async () => {
             const scheduler = Tesseract.createScheduler();
 
-            // 1 worker => more stable, less random variability
+            // 1 worker => less variability and fewer race issues
             for (let i = 0; i < 1; i++) {
                 const w = await Tesseract.createWorker();
                 await w.loadLanguage("eng");
                 await w.initialize("eng");
+
+                // Optimize for single digits only
                 await w.setParameters({
                     tessedit_char_whitelist: "123456789",
-                    // Tesseract v5 param name is "tessedit_pageseg_mode"
                     tessedit_pageseg_mode: "10", // SINGLE_CHAR
                     classify_bln_numeric_mode: "1",
                     user_defined_dpi: "300",
                     preserve_interword_spaces: "0",
                 });
+
                 scheduler.addWorker(w);
             }
 
@@ -61,13 +82,16 @@ window.OCR = (() => {
         return schedulerPromise;
     }
 
+    // Modal visibility helpers
     function showModal() { modal().hidden = false; }
     function hideModal() { modal().hidden = true; }
 
+    // Hit testing for crop square
     function pointInRect(px, py, r) {
         return px >= r.x && px <= r.x + r.s && py >= r.y && py <= r.y + r.s;
     }
 
+    // Detect corner handle hit for resize
     function hitHandle(px, py, r) {
         const corners = [
             { k: "nw", x: r.x, y: r.y },
@@ -82,15 +106,17 @@ window.OCR = (() => {
         return null;
     }
 
+    // Draw image + crop overlay
     function draw() {
         const cv = canvasEl();
         const ctx = cv.getContext("2d");
         ctx.clearRect(0, 0, cv.width, cv.height);
 
-        // dark background
+        // Dark background behind image
         ctx.fillStyle = "#0b1220";
         ctx.fillRect(0, 0, cv.width, cv.height);
 
+        // Draw uploaded image (scaled + centered)
         if (imgBitmap) {
             ctx.drawImage(
                 imgBitmap,
@@ -99,7 +125,7 @@ window.OCR = (() => {
             );
         }
 
-        // darken outside crop
+        // Dim outside crop area
         ctx.save();
         ctx.fillStyle = "rgba(0,0,0,.45)";
         ctx.beginPath();
@@ -108,12 +134,12 @@ window.OCR = (() => {
         ctx.fill("evenodd");
         ctx.restore();
 
-        // crop stroke
+        // Crop border
         ctx.lineWidth = 3;
         ctx.strokeStyle = "rgba(47,107,255,.95)";
         ctx.strokeRect(rect.x, rect.y, rect.s, rect.s);
 
-        // handles
+        // Corner handles
         const corners = [
             { x: rect.x, y: rect.y },
             { x: rect.x + rect.s, y: rect.y },
@@ -131,6 +157,7 @@ window.OCR = (() => {
         }
     }
 
+    // Convert pointer coordinates to canvas space (handles DPR + CSS scaling)
     function toCanvasPoint(e, cv) {
         const r = cv.getBoundingClientRect();
         const x = (e.clientX - r.left) * (cv.width / r.width);
@@ -138,6 +165,7 @@ window.OCR = (() => {
         return { x, y };
     }
 
+    // Bind pointer events once (drag to move, drag corners to resize)
     function bindCanvasEvents() {
         if (bound) return;
         bound = true;
@@ -170,6 +198,7 @@ window.OCR = (() => {
             const cvW = cv.width, cvH = cv.height;
             const minS = 180;
 
+            // Move crop square
             if (dragMode === "move") {
                 rect.x = clamp(start.rect.x + dx, 0, cvW - rect.s);
                 rect.y = clamp(start.rect.y + dy, 0, cvH - rect.s);
@@ -177,6 +206,7 @@ window.OCR = (() => {
                 return;
             }
 
+            // Resize crop square from corners (keep it square)
             let s = start.rect.s;
             if (dragMode === "se") s = start.rect.s + Math.max(dx, dy);
             if (dragMode === "nw") s = start.rect.s - Math.max(dx, dy);
@@ -185,6 +215,7 @@ window.OCR = (() => {
 
             s = clamp(s, minS, Math.min(cvW, cvH));
 
+            // Apply corner-specific anchor behavior
             if (dragMode === "se") {
                 rect.s = s;
             } else if (dragMode === "nw") {
@@ -201,6 +232,7 @@ window.OCR = (() => {
                 rect.y = start.rect.y;
             }
 
+            // Clamp final position to canvas bounds
             rect.x = clamp(rect.x, 0, cvW - rect.s);
             rect.y = clamp(rect.y, 0, cvH - rect.s);
 
@@ -210,18 +242,25 @@ window.OCR = (() => {
         cv.onpointerup = () => { dragMode = null; start = null; };
     }
 
+    // Public API:
+    // - Opens crop modal for an uploaded image file
+    // - Runs OCR after user clicks "Use Crop"
     async function openCropAndRead(file) {
+        // Decode image efficiently into a bitmap
         imgBitmap = await createImageBitmap(file);
         sourceW = imgBitmap.width;
         sourceH = imgBitmap.height;
 
+        // Size the canvas based on screen width while preserving aspect ratio
         const cv = canvasEl();
         const cssW = Math.min(880, window.innerWidth * 0.94);
         const aspect = sourceH / sourceW;
 
+        // Use devicePixelRatio to keep canvas crisp on Retina displays
         cv.width = Math.round(cssW * devicePixelRatio);
         cv.height = Math.round((cssW * aspect) * devicePixelRatio);
 
+        // Compute how the image is drawn into the canvas (scale + center)
         const cvW = cv.width, cvH = cv.height;
         const scale = Math.min(cvW / sourceW, cvH / sourceH);
         viewScale = scale;
@@ -231,6 +270,7 @@ window.OCR = (() => {
         viewOffX = (cvW - drawnW) / 2;
         viewOffY = (cvH - drawnH) / 2;
 
+        // Default crop rectangle: centered and slightly inset
         const s = Math.min(drawnW, drawnH) * 0.86;
         rect = {
             s: Math.max(260, Math.round(s)),
@@ -242,13 +282,17 @@ window.OCR = (() => {
         draw();
         bindCanvasEvents();
 
+        // Wrap the modal flow in a Promise for app.js to await
         return await new Promise((resolve, reject) => {
             const onCancel = () => { cleanup(); reject(new Error("OCR canceled")); };
 
             const onUse = async () => {
                 try {
+                    // Disable to prevent double-clicks
                     btnUse().disabled = true;
                     btnUse().textContent = "Reading...";
+
+                    // Yield one frame so UI updates before heavy OCR begins
                     await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
 
                     const grid = await runCellOCR();
@@ -260,6 +304,7 @@ window.OCR = (() => {
                 }
             };
 
+            // Restore modal to default state and remove event handlers
             function cleanup() {
                 btnUse().disabled = false;
                 btnUse().textContent = "Use Crop";
@@ -269,6 +314,7 @@ window.OCR = (() => {
                 hideModal();
             }
 
+            // Close if user clicks outside the card
             function outsideClick(e) { if (e.target === modal()) onCancel(); }
 
             btnUse().addEventListener("click", onUse);
@@ -277,6 +323,7 @@ window.OCR = (() => {
         });
     }
 
+    // Convert crop rectangle from canvas-space to source-image coordinates
     function canvasRectToSourceRect() {
         const sx = (rect.x - viewOffX) / viewScale;
         const sy = (rect.y - viewOffY) / viewScale;
@@ -289,6 +336,7 @@ window.OCR = (() => {
     }
 
     // ===== Image helpers =====
+    // These operate on ImageData in-place (mutating), for speed.
 
     function grayscale(imgData) {
         const d = imgData.data;
@@ -300,6 +348,7 @@ window.OCR = (() => {
         }
     }
 
+    // Stretch intensity range to improve contrast (helps faint digits)
     function autoContrast(imgData) {
         const d = imgData.data;
         let min = 255, max = 0;
@@ -315,6 +364,7 @@ window.OCR = (() => {
         }
     }
 
+    // Binary threshold: white background + black digits
     function threshold(imgData, t) {
         const d = imgData.data;
         for (let i = 0; i < d.length; i += 4) {
@@ -324,6 +374,7 @@ window.OCR = (() => {
         }
     }
 
+    // Invert black/white (sometimes helps depending on photo)
     function invert(imgData) {
         const d = imgData.data;
         for (let i = 0; i < d.length; i += 4) {
@@ -332,11 +383,12 @@ window.OCR = (() => {
         }
     }
 
-    // Percentile threshold: better for "mostly white + light-blue grid"
+    // Percentile-based threshold:
+    // Good for "mostly bright background + light-blue grid" images.
     function percentileThreshold(imgData) {
         const d = imgData.data;
         const vals = [];
-        for (let i = 0; i < d.length; i += 4 * 6) vals.push(d[i]); // sample
+        for (let i = 0; i < d.length; i += 4 * 6) vals.push(d[i]); // sample for speed
         vals.sort((a, b) => a - b);
 
         const p5 = vals[Math.floor(vals.length * 0.05)];
@@ -346,6 +398,7 @@ window.OCR = (() => {
         return t;
     }
 
+    // Simple dilation on binary image to thicken thin strokes
     function dilateBinary(imgData, w, h, iters = 1) {
         const d = imgData.data;
         const copy = new Uint8ClampedArray(d.length);
@@ -372,6 +425,7 @@ window.OCR = (() => {
         }
     }
 
+    // Detect blank cells (almost no black pixels after cleaning)
     function isMostlyEmpty(imgData) {
         const d = imgData.data;
         let black = 0;
@@ -380,7 +434,7 @@ window.OCR = (() => {
         return (black / total) < 0.010;
     }
 
-    // BIG accuracy boost: remove grid lines and clear borders (per cell)
+    // Remove dominant horizontal/vertical lines and clear borders
     function removeGridLines(imgData, w, h) {
         const d = imgData.data;
         const isBlack = (x, y) => d[(y * w + x) * 4] < 128;
@@ -390,7 +444,7 @@ window.OCR = (() => {
             d[p + 3] = 255;
         };
 
-        // remove horizontal lines
+        // Remove horizontal lines (rows with heavy black coverage)
         for (let y = 0; y < h; y++) {
             let black = 0;
             for (let x = 0; x < w; x++) if (isBlack(x, y)) black++;
@@ -399,7 +453,7 @@ window.OCR = (() => {
             }
         }
 
-        // remove vertical lines
+        // Remove vertical lines (columns with heavy black coverage)
         for (let x = 0; x < w; x++) {
             let black = 0;
             for (let y = 0; y < h; y++) if (isBlack(x, y)) black++;
@@ -408,7 +462,7 @@ window.OCR = (() => {
             }
         }
 
-        // clear border (kills edge grid)
+        // Clear border to kill edge grid artifacts
         const border = Math.max(2, Math.floor(Math.min(w, h) * 0.04));
         for (let y = 0; y < h; y++) {
             for (let x = 0; x < w; x++) {
@@ -419,10 +473,11 @@ window.OCR = (() => {
         }
     }
 
+    // Extract the best digit and confidence from Tesseract output
     function pickBestDigit(out) {
         const data = out?.data;
 
-        // symbols is best when available
+        // Prefer symbol-level confidence when available
         if (Array.isArray(data?.symbols) && data.symbols.length) {
             let best = { d: 0, conf: -1 };
             for (const s of data.symbols) {
@@ -434,13 +489,14 @@ window.OCR = (() => {
             if (best.conf >= 0) return best;
         }
 
-        // fallback
+        // Fallback: scan recognized text for any digit 1-9
         const txt = String(data?.text || "").replace(/\s/g, "");
         const m = txt.match(/[1-9]/);
         const conf = typeof data?.confidence === "number" ? data.confidence : 0;
         return { d: m ? Number(m[0]) : 0, conf };
     }
 
+    // If OCR creates conflicts, drop the lowest-confidence digits until valid
     function sanitizeConflicts(grid, conf) {
         if (!window.Solver?.validate) return grid;
 
@@ -452,6 +508,7 @@ window.OCR = (() => {
             const conflicted = [...v.conflicts];
             if (!conflicted.length) return g;
 
+            // Remove the least confident conflicted cell first
             conflicted.sort((a, b) => (conf[a] ?? 0) - (conf[b] ?? 0));
             const kill = conflicted[0];
             g[kill] = 0;
@@ -460,10 +517,11 @@ window.OCR = (() => {
         return g;
     }
 
+    // Run OCR for each of the 81 cells based on the current crop rectangle
     async function runCellOCR() {
         const { x, y, s } = canvasRectToSourceRect();
 
-        // normalize grid to fixed resolution
+        // Normalize crop to a fixed square resolution (improves OCR consistency)
         const gridCv = document.createElement("canvas");
         gridCv.width = 1080;
         gridCv.height = 1080;
@@ -471,7 +529,7 @@ window.OCR = (() => {
         const gctx = gridCv.getContext("2d", { willReadFrequently: true });
         gctx.drawImage(imgBitmap, x, y, s, s, 0, 0, 1080, 1080);
 
-        // preprocess whole grid
+        // Preprocess whole grid once (cheap win before splitting)
         const gridData = gctx.getImageData(0, 0, 1080, 1080);
         grayscale(gridData);
         autoContrast(gridData);
@@ -485,8 +543,9 @@ window.OCR = (() => {
         const conf = new Array(81).fill(0);
 
         const cellSize = 1080 / 9;
-        const pad = 22; // slightly bigger to avoid grid intersections
+        const pad = 22; // avoid grid intersections near edges
 
+        // Reuse one canvas for all cells (performance)
         const cellCv = document.createElement("canvas");
         cellCv.width = 240;
         cellCv.height = 240;
@@ -497,10 +556,12 @@ window.OCR = (() => {
             return pickBestDigit(out);
         }
 
+        // Process cells row by row
         for (let r = 0; r < 9; r++) {
             for (let c = 0; c < 9; c++) {
                 const i = r * 9 + c;
 
+                // Crop a padded cell region from the normalized grid
                 const cx = Math.round(c * cellSize + pad);
                 const cy = Math.round(r * cellSize + pad);
                 const cw = Math.round(cellSize - pad * 2);
@@ -509,7 +570,7 @@ window.OCR = (() => {
                 cctx.clearRect(0, 0, cellCv.width, cellCv.height);
                 cctx.drawImage(gridCv, cx, cy, cw, ch, 0, 0, cellCv.width, cellCv.height);
 
-                // per-cell adaptive threshold
+                // Build a strong per-cell binary image
                 const base = cctx.getImageData(0, 0, cellCv.width, cellCv.height);
                 grayscale(base);
                 autoContrast(base);
@@ -517,21 +578,22 @@ window.OCR = (() => {
                 const Tc = percentileThreshold(base);
                 threshold(base, Tc);
 
-                // remove grid lines BEFORE empty check
+                // Remove grid lines before checking emptiness
                 removeGridLines(base, cellCv.width, cellCv.height);
 
+                // Skip empty cells early
                 if (isMostlyEmpty(base)) {
                     grid[i] = 0;
                     conf[i] = 0;
                     continue;
                 }
 
-                // A: base
+                // Variant A: base + dilation
                 dilateBinary(base, cellCv.width, cellCv.height, 1);
                 cctx.putImageData(base, 0, 0);
                 const bestA = await recognizeBestFromCanvas(cellCv);
 
-                // B: slightly lower threshold (helps faint digits)
+                // Variant B: slightly lower threshold (helps very faint digits)
                 const b = cctx.getImageData(0, 0, cellCv.width, cellCv.height);
                 b.data.set(base.data);
                 threshold(b, clamp(Tc - 12, 95, 190));
@@ -540,7 +602,7 @@ window.OCR = (() => {
                 cctx.putImageData(b, 0, 0);
                 const bestB = await recognizeBestFromCanvas(cellCv);
 
-                // C: inverted
+                // Variant C: inverted (sometimes improves contrast for certain photos)
                 const cimg = cctx.getImageData(0, 0, cellCv.width, cellCv.height);
                 cimg.data.set(base.data);
                 invert(cimg);
@@ -548,12 +610,12 @@ window.OCR = (() => {
                 cctx.putImageData(cimg, 0, 0);
                 const bestC = await recognizeBestFromCanvas(cellCv);
 
-                // pick best confidence
+                // Choose the highest-confidence digit from A/B/C
                 let best = bestA;
                 if (bestB.conf > best.conf) best = bestB;
                 if (bestC.conf > best.conf) best = bestC;
 
-                // confidence cutoff
+                // Confidence cutoff: reject uncertain reads
                 if (best.d && best.conf >= 55) {
                     grid[i] = best.d;
                     conf[i] = best.conf;
@@ -564,8 +626,10 @@ window.OCR = (() => {
             }
         }
 
+        // Remove low-confidence digits that cause Sudoku conflicts
         return sanitizeConflicts(grid, conf);
     }
 
-    return { openCropAndRead };
+    // Public API
+    return { openCropAndRead }; // <- If your file has extra "is" after this, it will break JS
 })();

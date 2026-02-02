@@ -1,4 +1,5 @@
 :root {
+    /* Theme tokens (single source of truth for colors) */
     --bg: #ffffff;
     --text: #0b1220;
     --blue: #2f6bff;
@@ -9,15 +10,18 @@
 }
 
 /* ===== Reset ===== */
+/* Use border-box so padding/border don’t break sizing calculations */
 * {
     box-sizing: border-box;
 }
 
+/* Make layout math predictable for full-height centering */
 html,
 body {
     height: 100%;
 }
 
+/* Page base styling + center the app */
 body {
     margin: 0;
     background: var(--bg);
@@ -28,6 +32,7 @@ body {
 }
 
 /* ===== App Layout ===== */
+/* Constrain overall width and keep content neatly stacked */
 .app {
     width: min(680px, 96vw);
     display: grid;
@@ -37,6 +42,7 @@ body {
 }
 
 /* ===== Controls ===== */
+/* Top button row: centered, wraps nicely on small screens */
 .controls {
     display: flex;
     justify-content: center;
@@ -46,6 +52,7 @@ body {
 }
 
 /* ===== Buttons (Solve / Clear / Load) ===== */
+/* Shared button system: identical size, typography, and alignment */
 .btn,
 .fileBtn {
     /* SAME TEXT */
@@ -77,13 +84,13 @@ body {
     transition: transform 0.08s ease, opacity 0.15s ease;
 }
 
-/* Safari label fix */
+/* Safari label fix: make <label> behave like a normal button */
 label.btn.fileBtn {
     appearance: none;
     -webkit-appearance: none;
 }
 
-/* Active / disabled */
+/* Active / disabled states for better feedback */
 .btn:active {
     transform: translateY(1px) scale(0.99);
 }
@@ -93,7 +100,7 @@ label.btn.fileBtn {
     cursor: not-allowed;
 }
 
-/* Blue button */
+/* Primary action button */
 .btnBlue {
     background: var(--blue);
     border-color: rgba(47, 107, 255, 0.55);
@@ -101,6 +108,7 @@ label.btn.fileBtn {
 }
 
 /* ===== Sudoku Board ===== */
+/* 9x9 grid container (cells are generated in JS) */
 .board {
     width: min(560px, 94vw);
     display: grid;
@@ -111,6 +119,7 @@ label.btn.fileBtn {
     background: #fff;
 }
 
+/* Individual cell wrapper: keeps square shape and supports overlays */
 .cell {
     aspect-ratio: 1 / 1;
     border: 1px solid var(--border);
@@ -120,11 +129,12 @@ label.btn.fileBtn {
     position: relative;
 }
 
+/* Slight alternate tint for readability */
 .cell.alt {
     background: var(--cellAlt);
 }
 
-/* 3x3 borders */
+/* 3x3 borders: visually separate sub-grids */
 .cell.thickL {
     border-left: 3px solid rgba(47, 107, 255, 0.45);
 }
@@ -141,6 +151,7 @@ label.btn.fileBtn {
     border-bottom: 3px solid rgba(47, 107, 255, 0.45);
 }
 
+/* Cell input: full-size, centered, large readable digits */
 .cell input {
     width: 100%;
     height: 100%;
@@ -154,13 +165,14 @@ label.btn.fileBtn {
     caret-color: var(--blue);
 }
 
-/* Active cell */
+/* Active cell highlight (keyboard navigation / click focus) */
 .cell.active {
     box-shadow: inset 0 0 0 3px rgba(47, 107, 255, 0.55);
     z-index: 2;
 }
 
 /* ===== Conflict ===== */
+/* Used when validation detects duplicates in row/col/box */
 .cell.conflict {
     background: rgba(255, 59, 92, 0.12);
 }
@@ -170,10 +182,12 @@ label.btn.fileBtn {
 }
 
 /* ===== Solving Animation ===== */
+/* Subtle working outline while algorithm explores a cell */
 .cell.working {
     box-shadow: inset 0 0 0 3px rgba(47, 107, 255, 0.25);
 }
 
+/* Guess / backtrack coloring to visualize the search */
 .cell.guess {
     background: rgba(47, 107, 255, 0.10);
 }
@@ -183,16 +197,19 @@ label.btn.fileBtn {
 }
 
 /* ===== Solved / Given ===== */
+/* Solved digits (computed by solver) show in green */
 .cell.solved input {
     color: var(--good);
     font-weight: 950;
 }
 
+/* Given digits (original puzzle clues) keep default color */
 .cell.given input {
     color: var(--text);
 }
 
 /* ===== OCR Modal ===== */
+/* Full-screen overlay modal used for cropping the Sudoku area */
 .modal {
     position: fixed;
     inset: 0;
@@ -203,10 +220,12 @@ label.btn.fileBtn {
     padding: 14px;
 }
 
+/* Keep [hidden] working consistently */
 .modal[hidden] {
     display: none;
 }
 
+/* Modal container: card look with safe max width */
 .modalCard {
     width: min(920px, 96vw);
     background: #fff;
@@ -216,6 +235,7 @@ label.btn.fileBtn {
     overflow: hidden;
 }
 
+/* Header/footer bars inside modal */
 .modalTop,
 .modalBottom {
     display: flex;
@@ -231,10 +251,12 @@ label.btn.fileBtn {
     border-top: 1px solid var(--border);
 }
 
+/* Modal title emphasis */
 .modalTitle {
     font-weight: 950;
 }
 
+/* Dark stage behind the canvas for contrast */
 .cropWrap {
     background: #0b1220;
     display: grid;
@@ -242,6 +264,7 @@ label.btn.fileBtn {
     padding: 10px;
 }
 
+/* OCR canvas: touch-action none so drag/resize works on mobile Safari */
 #ocrCanvas {
     width: min(880px, 94vw);
     height: auto;
@@ -250,6 +273,7 @@ label.btn.fileBtn {
     touch-action: none;
 }
 
+/* Small helper text below the canvas */
 .smallNote {
     font-size: 13px;
     font-weight: 800;
