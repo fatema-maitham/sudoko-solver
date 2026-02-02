@@ -1,4 +1,4 @@
-# 🧩 Sudoku Solver (Web App)
+# 🧩 Sudoku Solver
 
 **Sudoku Solver** is a modern web-based Sudoku application built with **HTML, CSS, and JavaScript**.
 It allows users to **enter puzzles manually**, **load puzzles from text files**, or **scan Sudoku images using OCR**, then visually solve them step-by-step using a powerful solving algorithm.
@@ -80,14 +80,14 @@ Rendering: HTML Canvas
 
 ## 📁 Project Structure
 
-/
+```/
 ├── index.html      # Main HTML entry point and layout
 ├── styles.css      # Application styling (layout, board, buttons, modal)
 ├── app.js          # UI logic, user interactions, and solver animation
 ├── solver.js       # Core Sudoku solving engine and algorithms
 ├── ocr.js          # Image OCR, preprocessing, and grid extraction
 └── README.md       # Project documentation
-
+```
 ---
 
 ## ▶️ How to Run
