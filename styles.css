@@ -241,3 +241,47 @@ body {
     font-weight: 800;
     opacity: .75;
 }
+
+/* ===== FIX: modal click + layout ===== */
+.modalCard {
+    display: flex;
+    flex-direction: column;
+    max-height: min(92vh, 900px);
+}
+
+.cropWrap {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+}
+
+#ocrCanvas {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    pointer-events: auto;
+}
+
+/* Buttons always above canvas */
+.modalTop,
+.modalBottom {
+    position: sticky;
+    z-index: 5;
+    background: #fff;
+}
+
+.modalTop {
+    top: 0;
+}
+
+.modalBottom {
+    bottom: 0;
+}
+
+/* Ensure overlay does NOT block the buttons */
+.modalCard,
+.modalTop,
+.modalBottom,
+.btn {
+    pointer-events: auto;
+}
