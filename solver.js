@@ -159,10 +159,12 @@ window.Solver = (() => {
                 const s = clone(grid, cand);
 
                 if (!assign(s.grid, s.cand, cell, val, "guess")) {
+                    step({ type: "unassign", i: cell });
                     step({ type: "backtrack", i: cell, val });
                     continue;
                 }
                 if (!propagate(s.grid, s.cand)) {
+                    step({ type: "unassign", i: cell });
                     step({ type: "backtrack", i: cell, val });
                     continue;
                 }
@@ -170,6 +172,8 @@ window.Solver = (() => {
                 const res = dfs(s.grid, s.cand);
                 if (res) return res;
 
+                // show removal when backtracking
+                step({ type: "unassign", i: cell });
                 step({ type: "backtrack", i: cell, val });
             }
             return null;

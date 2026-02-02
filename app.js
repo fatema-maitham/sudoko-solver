@@ -47,7 +47,7 @@ window.addEventListener("DOMContentLoaded", () => {
         for (let i = 0; i < 81; i++) {
             cells[i].input.value = "";
             given[i] = false;
-            cells[i].wrap.classList.remove("conflict", "working", "guess", "backtrack", "solved", "given");
+            cells[i].wrap.classList.remove("conflict", "working", "guess", "backtrack", "solved", "given", "uncertain");
         }
         applyConflicts(new Set());
         focusCell(0);
@@ -60,20 +60,22 @@ window.addEventListener("DOMContentLoaded", () => {
         try {
             clearWorkMarks();
             applyConflicts(new Set());
+            applyUncertain(null);
 
             if (file.type.startsWith("image/")) {
                 setBtnText("Reading...");
                 disableAll(true);
 
-                const grid = await window.OCR.openCropAndRead(file);
-                fillGrid(grid);
+                const result = await window.OCR.openCropAndRead(file);
+                fillGrid(result.grid);
+                applyUncertain(result.uncertain);
+                applyConflicts(window.Solver.validate(getGrid()).conflicts);
             } else {
                 const text = await file.text();
                 const grid = string81ToGrid(text);
                 fillGrid(grid);
             }
 
-            // mark givens after load
             const gridNow = getGrid();
             for (let i = 0; i < 81; i++) {
                 given[i] = gridNow[i] !== 0;
@@ -100,9 +102,7 @@ window.addEventListener("DOMContentLoaded", () => {
         loadInput.disabled = dis;
     }
 
-    function setBtnText(t) {
-        solveBtn.textContent = t;
-    }
+    function setBtnText(t) { solveBtn.textContent = t; }
 
     function flashButton(text) {
         const old = solveBtn.textContent;
@@ -202,7 +202,7 @@ window.addEventListener("DOMContentLoaded", () => {
         if (v.length > 1) v = v[0];
         cells[i].input.value = v;
 
-        cells[i].wrap.classList.remove("solved", "guess", "backtrack", "working");
+        cells[i].wrap.classList.remove("solved", "guess", "backtrack", "working", "uncertain");
         given[i] = v !== "";
         cells[i].wrap.classList.toggle("given", given[i]);
 
@@ -223,7 +223,7 @@ window.addEventListener("DOMContentLoaded", () => {
         for (let i = 0; i < 81; i++) {
             const v = grid[i] || 0;
             cells[i].input.value = v ? String(v) : "";
-            cells[i].wrap.classList.remove("solved", "guess", "backtrack", "working", "conflict");
+            cells[i].wrap.classList.remove("solved", "guess", "backtrack", "working", "conflict", "uncertain");
         }
         const res = window.Solver.validate(getGrid());
         applyConflicts(res.conflicts);
@@ -232,6 +232,12 @@ window.addEventListener("DOMContentLoaded", () => {
     function applyConflicts(conflicts) {
         for (const c of cells) c.wrap.classList.remove("conflict");
         for (const i of conflicts) cells[i].wrap.classList.add("conflict");
+    }
+
+    function applyUncertain(arr) {
+        for (const c of cells) c.wrap.classList.remove("uncertain");
+        if (!Array.isArray(arr)) return;
+        for (let i = 0; i < 81; i++) if (arr[i]) cells[i].wrap.classList.add("uncertain");
     }
 
     function clearWorkMarks() {
@@ -284,6 +290,11 @@ window.addEventListener("DOMContentLoaded", () => {
                         cells[step.i].input.value = String(step.val);
                     }
 
+                    // NEW: show removal on backtracking
+                    if (step.type === "unassign") {
+                        if (!given[step.i]) cells[step.i].input.value = "";
+                    }
+
                     if (step.type === "guess") cells[step.i].wrap.classList.add("guess");
                     if (step.type === "backtrack") cells[step.i].wrap.classList.add("backtrack");
                 }
@@ -299,6 +310,7 @@ window.addEventListener("DOMContentLoaded", () => {
             cells[i].input.value = solvedGrid[i] ? String(solvedGrid[i]) : "";
             cells[i].wrap.classList.toggle("given", given[i]);
             cells[i].wrap.classList.toggle("solved", !given[i] && solvedGrid[i] !== 0);
+            cells[i].wrap.classList.remove("uncertain");
         }
 
         clearWorkMarks();

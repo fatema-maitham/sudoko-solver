@@ -1,6 +1,14 @@
-// ocr.js
+// ocr.js (FINAL)
 // Exposes: window.OCR = { openCropAndRead(file) }
-// Flow: upload image -> crop modal -> OCR each cell -> returns grid[81]
+// Returns: { grid: number[81], uncertain: boolean[81], conf: number[81] }
+//
+// Key upgrades:
+// - Uses Tesseract Scheduler (2 workers) for speed
+// - Per-cell OFFSCREEN canvases (no overwrite bug)
+// - Strong preprocess: grayscale + contrast + Otsu threshold + border clear
+// - Tight digit bounding box + centered render (big accuracy boost)
+// - Auto-clears weakest OCR digits if they create Sudoku conflicts
+// - uncertain[] highlights medium-confidence digits
 
 window.OCR = (() => {
     const modal = () => document.getElementById("ocrModal");
@@ -8,48 +16,53 @@ window.OCR = (() => {
     const btnUse = () => document.getElementById("ocrUse");
     const btnClose = () => document.getElementById("ocrClose");
 
-    let imgBitmap = null;           // ImageBitmap
-    let sourceW = 0, sourceH = 0;   // source size
-    let viewScale = 1;              // source -> canvas scale
-    let viewOffX = 0, viewOffY = 0; // letterbox offsets
+    let imgBitmap = null;
+    let sourceW = 0, sourceH = 0;
+    let viewScale = 1;
+    let viewOffX = 0, viewOffY = 0;
 
     // crop rect in CANVAS coords
     let rect = { x: 40, y: 40, s: 300 };
     const HANDLE = 12;
 
-    let dragMode = null; // "move" | "nw" | "ne" | "sw" | "se"
+    let dragMode = null;
     let start = null;
 
-    // Create ONE worker for speed
-    let workerPromise = null;
+    let schedulerPromise = null;
 
-    async function getWorker() {
+    async function getScheduler() {
         if (!window.Tesseract) throw new Error("OCR needs internet (Tesseract CDN).");
-        if (workerPromise) return workerPromise;
+        if (schedulerPromise) return schedulerPromise;
 
-        workerPromise = (async () => {
-            const w = await Tesseract.createWorker();
-            await w.loadLanguage("eng");
-            await w.initialize("eng");
+        schedulerPromise = (async () => {
+            const scheduler = Tesseract.createScheduler();
 
-            // IMPORTANT: make OCR behave like "one digit per image"
-            await w.setParameters({
-                tessedit_char_whitelist: "123456789",
-                tessedit_pageseg_mode: "10",       // PSM 10 = SINGLE_CHAR
-                classify_bln_numeric_mode: "1",
-                user_defined_dpi: "300",
-                preserve_interword_spaces: "0",
-            });
+            const workerCount = 2; // best balance on most laptops
+            for (let i = 0; i < workerCount; i++) {
+                const w = await Tesseract.createWorker();
+                await w.loadLanguage("eng");
+                await w.initialize("eng");
 
-            return w;
+                await w.setParameters({
+                    tessedit_char_whitelist: "123456789",
+                    tessedit_pageseg_mode: "10",        // single char
+                    classify_bln_numeric_mode: "1",
+                    user_defined_dpi: "300",
+                    preserve_interword_spaces: "0",
+                    tessedit_ocr_engine_mode: "1"       // LSTM only
+                });
+
+                scheduler.addWorker(w);
+            }
+
+            return scheduler;
         })();
 
-        return workerPromise;
+        return schedulerPromise;
     }
 
     function showModal() { modal().hidden = false; }
     function hideModal() { modal().hidden = true; }
-
     function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
     function pointInRect(px, py, r) {
@@ -73,8 +86,8 @@ window.OCR = (() => {
     function draw() {
         const cv = canvasEl();
         const ctx = cv.getContext("2d");
-        ctx.clearRect(0, 0, cv.width, cv.height);
 
+        ctx.clearRect(0, 0, cv.width, cv.height);
         ctx.fillStyle = "#0b1220";
         ctx.fillRect(0, 0, cv.width, cv.height);
 
@@ -86,7 +99,7 @@ window.OCR = (() => {
             );
         }
 
-        // overlay outside crop
+        // dark overlay outside rect
         ctx.save();
         ctx.fillStyle = "rgba(0,0,0,.45)";
         ctx.beginPath();
@@ -95,6 +108,7 @@ window.OCR = (() => {
         ctx.fill("evenodd");
         ctx.restore();
 
+        // rect border
         ctx.lineWidth = 3;
         ctx.strokeStyle = "rgba(47,107,255,.95)";
         ctx.strokeRect(rect.x, rect.y, rect.s, rect.s);
@@ -132,11 +146,7 @@ window.OCR = (() => {
             const p = toCanvasPoint(e, cv);
 
             const h = hitHandle(p.x, p.y, rect);
-            if (h) {
-                dragMode = h;
-                start = { ...p, rect: { ...rect } };
-                return;
-            }
+            if (h) { dragMode = h; start = { ...p, rect: { ...rect } }; return; }
 
             if (pointInRect(p.x, p.y, rect)) {
                 dragMode = "move";
@@ -155,7 +165,7 @@ window.OCR = (() => {
             const dy = p.y - start.y;
 
             const cvW = cv.width, cvH = cv.height;
-            const minS = 140;
+            const minS = 180;
 
             if (dragMode === "move") {
                 rect.x = clamp(start.rect.x + dx, 0, cvW - rect.s);
@@ -190,14 +200,10 @@ window.OCR = (() => {
 
             rect.x = clamp(rect.x, 0, cvW - rect.s);
             rect.y = clamp(rect.y, 0, cvH - rect.s);
-
             draw();
         };
 
-        cv.onpointerup = () => {
-            dragMode = null;
-            start = null;
-        };
+        cv.onpointerup = () => { dragMode = null; start = null; };
     }
 
     async function openCropAndRead(file) {
@@ -213,17 +219,16 @@ window.OCR = (() => {
         cv.height = Math.round((cssW * aspect) * devicePixelRatio);
 
         const cvW = cv.width, cvH = cv.height;
-        const scale = Math.min(cvW / sourceW, cvH / sourceH);
-        viewScale = scale;
+        viewScale = Math.min(cvW / sourceW, cvH / sourceH);
 
-        const drawnW = sourceW * scale;
-        const drawnH = sourceH * scale;
+        const drawnW = sourceW * viewScale;
+        const drawnH = sourceH * viewScale;
         viewOffX = (cvW - drawnW) / 2;
         viewOffY = (cvH - drawnH) / 2;
 
         const s = Math.min(drawnW, drawnH) * 0.86;
         rect = {
-            s: Math.max(220, Math.round(s)),
+            s: Math.max(260, Math.round(s)),
             x: Math.round(viewOffX + (drawnW - s) / 2),
             y: Math.round(viewOffY + (drawnH - s) / 2)
         };
@@ -233,19 +238,15 @@ window.OCR = (() => {
         bindCanvasEvents();
 
         return await new Promise((resolve, reject) => {
-            const onCancel = () => {
-                cleanup();
-                reject(new Error("OCR canceled"));
-            };
+            const onCancel = () => { cleanup(); reject(new Error("OCR canceled")); };
 
             const onUse = async () => {
                 try {
                     btnUse().disabled = true;
                     btnUse().textContent = "Reading...";
-
-                    const grid = await runCellOCR();
+                    const result = await runGridOCR();
                     cleanup();
-                    resolve(grid);
+                    resolve(result);
                 } catch (e) {
                     cleanup();
                     reject(e);
@@ -261,9 +262,7 @@ window.OCR = (() => {
                 hideModal();
             }
 
-            function outsideClick(e) {
-                if (e.target === modal()) onCancel();
-            }
+            function outsideClick(e) { if (e.target === modal()) onCancel(); }
 
             btnUse().addEventListener("click", onUse);
             btnClose().addEventListener("click", onCancel);
@@ -278,12 +277,11 @@ window.OCR = (() => {
 
         const x = clamp(sx, 0, sourceW - 1);
         const y = clamp(sy, 0, sourceH - 1);
-        const s = clamp(ss, 80, Math.min(sourceW - x, sourceH - y));
+        const s = clamp(ss, 120, Math.min(sourceW - x, sourceH - y));
         return { x, y, s };
     }
 
-    // --------- Image preprocessing helpers ---------
-
+    // ===== image helpers =====
     function grayscale(imgData) {
         const d = imgData.data;
         for (let i = 0; i < d.length; i += 4) {
@@ -294,7 +292,6 @@ window.OCR = (() => {
         }
     }
 
-    // simple contrast stretch
     function autoContrast(imgData) {
         const d = imgData.data;
         let min = 255, max = 0;
@@ -310,6 +307,43 @@ window.OCR = (() => {
         }
     }
 
+    function otsuThreshold(grayImgData) {
+        const d = grayImgData.data;
+        const hist = new Array(256).fill(0);
+        let total = 0;
+
+        for (let i = 0; i < d.length; i += 4) {
+            hist[d[i] | 0]++;
+            total++;
+        }
+
+        let sum = 0;
+        for (let t = 0; t < 256; t++) sum += t * hist[t];
+
+        let sumB = 0;
+        let wB = 0;
+        let varMax = 0;
+        let threshold = 180;
+
+        for (let t = 0; t < 256; t++) {
+            wB += hist[t];
+            if (wB === 0) continue;
+            const wF = total - wB;
+            if (wF === 0) break;
+
+            sumB += t * hist[t];
+            const mB = sumB / wB;
+            const mF = (sum - sumB) / wF;
+
+            const varBetween = wB * wF * (mB - mF) * (mB - mF);
+            if (varBetween > varMax) {
+                varMax = varBetween;
+                threshold = t;
+            }
+        }
+        return threshold;
+    }
+
     function threshold(imgData, t) {
         const d = imgData.data;
         for (let i = 0; i < d.length; i += 4) {
@@ -319,243 +353,233 @@ window.OCR = (() => {
         }
     }
 
-    function invert(imgData) {
+    function clearFrame(imgData, w, h, frame) {
         const d = imgData.data;
-        for (let i = 0; i < d.length; i += 4) {
-            const v = 255 - d[i];
-            d[i] = d[i + 1] = d[i + 2] = v;
-        }
-    }
-
-    // Remove strong vertical/horizontal grid lines from a binary image
-    function removeGridLinesBinary(imgData, w, h) {
-        const d = imgData.data;
-        const isBlack = (i) => d[i] < 128;
-
-        // columns
-        const colBlack = new Uint16Array(w);
-        for (let x = 0; x < w; x++) {
-            let cnt = 0;
-            for (let y = 0; y < h; y++) {
-                const p = (y * w + x) * 4;
-                if (isBlack(p)) cnt++;
-            }
-            colBlack[x] = cnt;
-        }
-
-        // rows
-        const rowBlack = new Uint16Array(h);
-        for (let y = 0; y < h; y++) {
-            let cnt = 0;
-            for (let x = 0; x < w; x++) {
-                const p = (y * w + x) * 4;
-                if (isBlack(p)) cnt++;
-            }
-            rowBlack[y] = cnt;
-        }
-
-        // if a column/row is "too black", it's probably a grid line
-        const colLine = x => colBlack[x] > h * 0.70;
-        const rowLine = y => rowBlack[y] > w * 0.70;
-
-        // erase in a small band around detected lines
-        const band = 2;
-
-        for (let x = 0; x < w; x++) {
-            if (!colLine(x)) continue;
-            for (let dx = -band; dx <= band; dx++) {
-                const xx = x + dx;
-                if (xx < 0 || xx >= w) continue;
-                for (let y = 0; y < h; y++) {
-                    const p = (y * w + xx) * 4;
+        for (let yy = 0; yy < h; yy++) {
+            for (let xx = 0; xx < w; xx++) {
+                if (xx < frame || yy < frame || xx >= w - frame || yy >= h - frame) {
+                    const p = (yy * w + xx) * 4;
                     d[p] = d[p + 1] = d[p + 2] = 255;
-                }
-            }
-        }
-
-        for (let y = 0; y < h; y++) {
-            if (!rowLine(y)) continue;
-            for (let dy = -band; dy <= band; dy++) {
-                const yy = y + dy;
-                if (yy < 0 || yy >= h) continue;
-                for (let x = 0; x < w; x++) {
-                    const p = (yy * w + x) * 4;
-                    d[p] = d[p + 1] = d[p + 2] = 255;
+                    d[p + 3] = 255;
                 }
             }
         }
     }
 
-    // estimate if cell is mostly empty (binary)
-    function isMostlyEmpty(imgData) {
-        const d = imgData.data;
-        let black = 0;
-        const total = d.length / 4;
-        for (let i = 0; i < d.length; i += 4) {
-            if (d[i] < 128) black++;
+    function findInkBox(binaryImgData, w, h) {
+        const d = binaryImgData.data;
+        let minX = w, minY = h, maxX = -1, maxY = -1;
+
+        for (let yy = 0; yy < h; yy++) {
+            for (let xx = 0; xx < w; xx++) {
+                const p = (yy * w + xx) * 4;
+                if (d[p] < 128) {
+                    if (xx < minX) minX = xx;
+                    if (yy < minY) minY = yy;
+                    if (xx > maxX) maxX = xx;
+                    if (yy > maxY) maxY = yy;
+                }
+            }
         }
-        return (black / total) < 0.010; // <1% ink -> empty
+
+        if (maxX < 0) return null;
+        return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
     }
 
-    // Extract best digit + confidence from tesseract output
     function pickBestDigit(data) {
-        // Prefer symbols array if available
+        // prefer per-symbol confidence if available
         if (Array.isArray(data?.symbols) && data.symbols.length) {
             let best = { d: 0, conf: -1 };
             for (const s of data.symbols) {
                 const ch = (s?.text || "").trim();
                 if (!/^[1-9]$/.test(ch)) continue;
-                const conf = typeof s.confidence === "number" ? s.confidence : 0;
-                if (conf > best.conf) best = { d: Number(ch), conf };
+                const cf = typeof s.confidence === "number" ? s.confidence : 0;
+                if (cf > best.conf) best = { d: Number(ch), conf: cf };
             }
             if (best.conf >= 0) return best;
         }
 
-        // fallback: parse text
         const txt = String(data?.text || "").replace(/\s/g, "");
         const m = txt.match(/[1-9]/);
-        const conf = typeof data?.confidence === "number" ? data.confidence : 0;
-        return { d: m ? Number(m[0]) : 0, conf };
+        const cf = typeof data?.confidence === "number" ? data.confidence : 0;
+        return { d: m ? Number(m[0]) : 0, conf: cf };
     }
 
-    // If OCR made conflicts, blank the lowest-confidence conflicted cells
-    function sanitizeConflicts(grid, conf) {
-        if (!window.Solver?.validate) return grid;
+    // ===== Sudoku conflicts helper (auto clear weak OCR digits) =====
+    function validateConflicts(grid) {
+        const conflicts = new Set();
+        const idx = (r, c) => r * 9 + c;
 
-        let g = grid.slice();
-        for (let safety = 0; safety < 40; safety++) {
-            const v = window.Solver.validate(g);
-            if (v.ok) return g;
-
-            const conflicted = [...v.conflicts];
-            if (!conflicted.length) return g;
-
-            // choose conflicted cell with lowest confidence, blank it
-            conflicted.sort((a, b) => (conf[a] ?? 0) - (conf[b] ?? 0));
-            const kill = conflicted[0];
-            g[kill] = 0;
-            conf[kill] = -1;
+        const units = [];
+        for (let r = 0; r < 9; r++) units.push(Array.from({ length: 9 }, (_, c) => idx(r, c)));
+        for (let c = 0; c < 9; c++) units.push(Array.from({ length: 9 }, (_, r) => idx(r, c)));
+        for (let br = 0; br < 3; br++) for (let bc = 0; bc < 3; bc++) {
+            const box = [];
+            for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) box.push(idx(br * 3 + r, bc * 3 + c));
+            units.push(box);
         }
-        return g;
+
+        for (const unit of units) {
+            const seen = new Map();
+            for (const i of unit) {
+                const v = grid[i];
+                if (!v) continue;
+                if (seen.has(v)) { conflicts.add(i); conflicts.add(seen.get(v)); }
+                else seen.set(v, i);
+            }
+        }
+        return conflicts;
     }
 
-    async function runCellOCR() {
+    function autoClearConflicts(grid, conf) {
+        const g = grid.slice();
+        const c = conf.slice();
+
+        let loops = 0;
+        while (loops++ < 200) {
+            const conflicts = validateConflicts(g);
+            if (conflicts.size === 0) break;
+
+            let worstI = -1;
+            let worst = 9999;
+
+            for (const i of conflicts) {
+                if (g[i] === 0) continue;
+                const ci = c[i] || 0;
+                if (ci < worst) { worst = ci; worstI = i; }
+            }
+            if (worstI === -1) break;
+
+            g[worstI] = 0;
+            c[worstI] = 0;
+        }
+
+        return { grid: g, conf: c };
+    }
+
+    // ===== concurrency helper =====
+    async function runWithLimit(tasks, limit) {
+        let next = 0;
+        const workers = Array.from({ length: limit }, async () => {
+            while (true) {
+                const i = next++;
+                if (i >= tasks.length) break;
+                await tasks[i]();
+            }
+        });
+        await Promise.all(workers);
+    }
+
+    // ===== MAIN OCR =====
+    async function runGridOCR() {
         const { x, y, s } = canvasRectToSourceRect();
 
-        // Square grid canvas
+        // 1) Crop whole grid to 900x900
         const gridCv = document.createElement("canvas");
         gridCv.width = 900;
         gridCv.height = 900;
         const gctx = gridCv.getContext("2d", { willReadFrequently: true });
-
         gctx.drawImage(imgBitmap, x, y, s, s, 0, 0, 900, 900);
 
-        // preprocess whole grid: grayscale -> contrast -> threshold -> remove lines
-        const gridData = gctx.getImageData(0, 0, 900, 900);
-        grayscale(gridData);
-        autoContrast(gridData);
+        const scheduler = await getScheduler();
 
-        // dynamic threshold: based on average brightness
-        let sum = 0;
-        const d = gridData.data;
-        for (let i = 0; i < d.length; i += 4) sum += d[i];
-        const avg = sum / (d.length / 4);
-        const t = clamp(avg * 0.90, 110, 200);
-
-        threshold(gridData, t);
-        removeGridLinesBinary(gridData, 900, 900);
-
-        gctx.putImageData(gridData, 0, 0);
-
-        const worker = await getWorker();
         const grid = new Array(81).fill(0);
         const conf = new Array(81).fill(0);
 
         const cellSize = 900 / 9;
+        const pad = 6;
 
-        // bigger pad reduces line artifacts
-        const pad = 14;
+        // Tune these 2 numbers if needed:
+        const CELL_CANVAS = 360;    // bigger = more accurate, slower
+        const ACCEPT = 18;          // higher = fewer wrong digits but more empties
+        const CONCURRENCY = 10;     // how many cells preprocess at once
 
-        // cell canvas
-        const cellCv = document.createElement("canvas");
-        cellCv.width = 160;
-        cellCv.height = 160;
-        const cctx = cellCv.getContext("2d", { willReadFrequently: true });
+        const tasks = [];
 
         for (let r = 0; r < 9; r++) {
             for (let c = 0; c < 9; c++) {
                 const i = r * 9 + c;
 
-                const cx = Math.round(c * cellSize + pad);
-                const cy = Math.round(r * cellSize + pad);
-                const cw = Math.round(cellSize - pad * 2);
-                const ch = Math.round(cellSize - pad * 2);
+                tasks.push(async () => {
+                    // Each cell has its own canvases (prevents overwrite bug)
+                    const cellCv = document.createElement("canvas");
+                    cellCv.width = CELL_CANVAS;
+                    cellCv.height = CELL_CANVAS;
+                    const cctx = cellCv.getContext("2d", { willReadFrequently: true });
 
-                // draw cell region scaled up
-                cctx.clearRect(0, 0, cellCv.width, cellCv.height);
-                cctx.drawImage(gridCv, cx, cy, cw, ch, 0, 0, cellCv.width, cellCv.height);
+                    const tightCv = document.createElement("canvas");
+                    tightCv.width = CELL_CANVAS;
+                    tightCv.height = CELL_CANVAS;
+                    const tctx = tightCv.getContext("2d", { willReadFrequently: true });
 
-                // binarize cell again (tighter), helps shaky photos
-                const cd = cctx.getImageData(0, 0, cellCv.width, cellCv.height);
-                // small contrast + threshold
-                grayscale(cd);
-                autoContrast(cd);
-                threshold(cd, 155);
+                    const cx = Math.round(c * cellSize + pad);
+                    const cy = Math.round(r * cellSize + pad);
+                    const cw = Math.round(cellSize - pad * 2);
+                    const ch = Math.round(cellSize - pad * 2);
 
-                // if empty, skip OCR
-                if (isMostlyEmpty(cd)) {
-                    grid[i] = 0;
-                    conf[i] = 0;
-                    continue;
-                }
+                    cctx.clearRect(0, 0, CELL_CANVAS, CELL_CANVAS);
+                    cctx.drawImage(gridCv, cx, cy, cw, ch, 0, 0, CELL_CANVAS, CELL_CANVAS);
 
-                // remove tiny border noise: wipe a small frame
-                const frame = 6;
-                const dd = cd.data;
-                const w = cellCv.width, h = cellCv.height;
-                for (let y = 0; y < h; y++) {
-                    for (let x = 0; x < w; x++) {
-                        if (x < frame || y < frame || x >= w - frame || y >= h - frame) {
-                            const p = (y * w + x) * 4;
-                            dd[p] = dd[p + 1] = dd[p + 2] = 255;
-                        }
+                    // preprocess
+                    let img = cctx.getImageData(0, 0, CELL_CANVAS, CELL_CANVAS);
+                    grayscale(img);
+                    autoContrast(img);
+
+                    const t = otsuThreshold(img);
+                    // bias to keep thin strokes
+                    threshold(img, Math.min(235, Math.max(110, t + 10)));
+
+                    // remove grid lines near edges
+                    clearFrame(img, CELL_CANVAS, CELL_CANVAS, Math.round(CELL_CANVAS * 0.04));
+
+                    const box = findInkBox(img, CELL_CANVAS, CELL_CANVAS);
+                    if (!box) { grid[i] = 0; conf[i] = 0; return; }
+
+                    // tight crop + center
+                    cctx.putImageData(img, 0, 0);
+
+                    const expand = Math.round(CELL_CANVAS * 0.05);
+                    const bx = clamp(box.x - expand, 0, CELL_CANVAS - 1);
+                    const by = clamp(box.y - expand, 0, CELL_CANVAS - 1);
+                    const bw = clamp(box.w + expand * 2, 1, CELL_CANVAS - bx);
+                    const bh = clamp(box.h + expand * 2, 1, CELL_CANVAS - by);
+
+                    tctx.clearRect(0, 0, CELL_CANVAS, CELL_CANVAS);
+                    tctx.fillStyle = "#fff";
+                    tctx.fillRect(0, 0, CELL_CANVAS, CELL_CANVAS);
+
+                    const scale = Math.min((CELL_CANVAS * 0.72) / bw, (CELL_CANVAS * 0.72) / bh);
+                    const dw = bw * scale;
+                    const dh = bh * scale;
+                    const dx = (CELL_CANVAS - dw) / 2;
+                    const dy = (CELL_CANVAS - dh) / 2;
+
+                    tctx.drawImage(cellCv, bx, by, bw, bh, dx, dy, dw, dh);
+
+                    // OCR on scheduler worker
+                    const out = await scheduler.addJob("recognize", tightCv);
+                    const best = pickBestDigit(out.data);
+
+                    if (best.d && best.conf >= ACCEPT) {
+                        grid[i] = best.d;
+                        conf[i] = best.conf;
+                    } else {
+                        grid[i] = 0;
+                        conf[i] = best.conf || 0;
                     }
-                }
-
-                cctx.putImageData(cd, 0, 0);
-
-                // OCR twice: normal + inverted, pick best confidence
-                const out1 = await worker.recognize(cellCv);
-                const best1 = pickBestDigit(out1.data);
-
-                // inverted pass (sometimes digits are light on dark)
-                const cd2 = cctx.getImageData(0, 0, w, h);
-                invert(cd2);
-                cctx.putImageData(cd2, 0, 0);
-
-                const out2 = await worker.recognize(cellCv);
-                const best2 = pickBestDigit(out2.data);
-
-                // restore (not required, but cleaner)
-                invert(cd2);
-                cctx.putImageData(cd2, 0, 0);
-
-                const best = (best2.conf > best1.conf) ? best2 : best1;
-
-                // STRICT confidence cutoff (prevents random wrong digits)
-                if (best.d && best.conf >= 70) {
-                    grid[i] = best.d;
-                    conf[i] = best.conf;
-                } else {
-                    grid[i] = 0;
-                    conf[i] = best.conf || 0;
-                }
+                });
             }
         }
 
-        // If OCR created conflicts, blank lowest-confidence conflicted cells
-        const cleaned = sanitizeConflicts(grid, conf);
-        return cleaned;
+        await runWithLimit(tasks, CONCURRENCY);
+
+        // Auto-clear conflicts (removes weakest OCR digits until valid)
+        const fixed = autoClearConflicts(grid, conf);
+
+        // Mark uncertain digits (yellow)
+        const uncertain = fixed.grid.map((v, i) => v !== 0 && (fixed.conf[i] || 0) < 78);
+
+        return { grid: fixed.grid, uncertain, conf: fixed.conf };
     }
 
     return { openCropAndRead };

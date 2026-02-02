@@ -9,28 +9,31 @@
 }
 
 * {
-    box-sizing: border-box
+    box-sizing: border-box;
 }
 
 html,
 body {
-    height: 100%
+    height: 100%;
 }
 
 body {
     margin: 0;
+    min-height: 100vh;
     background: var(--bg);
     color: var(--text);
     font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
-    display: grid;
-    place-items: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .app {
     width: min(680px, 96vw);
     display: grid;
-    gap: 12px;
-    padding: 16px 0;
+    justify-items: center;
+    gap: 14px;
+    padding: 18px 0;
 }
 
 .controls {
@@ -39,6 +42,7 @@ body {
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
+    width: 100%;
 }
 
 .btn {
@@ -54,12 +58,12 @@ body {
 }
 
 .btn:active {
-    transform: translateY(1px) scale(.99)
+    transform: translateY(1px) scale(.99);
 }
 
 .btn:disabled {
     opacity: .55;
-    cursor: not-allowed
+    cursor: not-allowed;
 }
 
 .btnBlue {
@@ -76,6 +80,7 @@ body {
 
 .board {
     width: min(560px, 94vw);
+    aspect-ratio: 1 / 1;
     display: grid;
     grid-template-columns: repeat(9, 1fr);
     border-radius: 14px;
@@ -94,23 +99,23 @@ body {
 }
 
 .cell.alt {
-    background: var(--cellAlt)
+    background: var(--cellAlt);
 }
 
 .cell.thickL {
-    border-left: 3px solid rgba(47, 107, 255, .45)
+    border-left: 3px solid rgba(47, 107, 255, .45);
 }
 
 .cell.thickT {
-    border-top: 3px solid rgba(47, 107, 255, .45)
+    border-top: 3px solid rgba(47, 107, 255, .45);
 }
 
 .cell.thickR {
-    border-right: 3px solid rgba(47, 107, 255, .45)
+    border-right: 3px solid rgba(47, 107, 255, .45);
 }
 
 .cell.thickB {
-    border-bottom: 3px solid rgba(47, 107, 255, .45)
+    border-bottom: 3px solid rgba(47, 107, 255, .45);
 }
 
 .cell input {
@@ -131,37 +136,46 @@ body {
     z-index: 2;
 }
 
-/* RED for conflicts */
+/* RED conflicts */
 .cell.conflict {
-    background: rgba(255, 59, 92, .12)
+    background: rgba(255, 59, 92, .12);
 }
 
 .cell.conflict input {
-    color: #b90f2f
+    color: #b90f2f;
 }
 
-/* animation marks */
+/* solving marks */
 .cell.working {
-    box-shadow: inset 0 0 0 3px rgba(47, 107, 255, .25)
+    box-shadow: inset 0 0 0 3px rgba(47, 107, 255, .25);
 }
 
 .cell.guess {
-    background: rgba(47, 107, 255, .10)
+    background: rgba(47, 107, 255, .10);
 }
 
 .cell.backtrack {
-    background: rgba(255, 59, 92, .10)
+    background: rgba(255, 59, 92, .10);
 }
 
-/* solved values in GREEN */
+/* solved values */
 .cell.solved input {
     color: var(--good);
-    font-weight: 950
+    font-weight: 950;
 }
 
-/* user numbers (manual/loaded/ocr) */
+/* given */
 .cell.given input {
-    color: var(--text)
+    color: var(--text);
+}
+
+/* OCR uncertain highlight (yellow) */
+.cell.uncertain {
+    background: rgba(255, 215, 0, 0.18);
+}
+
+.cell.uncertain input {
+    color: #8a5b00;
 }
 
 /* ===== OCR Modal ===== */
@@ -176,7 +190,7 @@ body {
 }
 
 .modal[hidden] {
-    display: none
+    display: none;
 }
 
 .modalCard {
