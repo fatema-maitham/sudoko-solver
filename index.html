@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Sudoku Solver</title>
+    <link rel="stylesheet" href="./styles.css" />
+</head>
+
+<body>
+    <main class="app">
+        <section class="controls" aria-label="Controls">
+            <button id="solveBtn" class="btn btnBlue" type="button">Solve</button>
+            <button id="clearBtn" class="btn" type="button">Clear</button>
+
+            <label class="btn fileBtn" role="button" tabindex="0">
+                Load Puzzle
+                <input id="loadInput" type="file" accept=".txt,text/plain,image/*" hidden />
+            </label>
+        </section>
+
+        <section id="board" class="board" aria-label="Sudoku board"></section>
+    </main>
+
+    <!-- OCR Crop Modal -->
+    <div id="ocrModal" class="modal" hidden>
+        <div class="modalCard">
+            <div class="modalTop">
+                <div class="modalTitle">Crop Sudoku Grid</div>
+                <button id="ocrClose" class="btn" type="button">Cancel</button>
+            </div>
+
+            <div class="cropWrap">
+                <canvas id="ocrCanvas"></canvas>
+            </div>
+
+            <div class="modalBottom">
+                <div class="smallNote">Drag/resize the square to cover ONLY the Sudoku grid.</div>
+                <button id="ocrUse" class="btn btnBlue" type="button">Use Crop</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- OCR library (needs internet) -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+    <!-- App scripts -->
+    <script src="./solver.js"></script>
+    <script src="./ocr.js"></script>
+    <script src="./app.js"></script>
+</body>
+
+</html>

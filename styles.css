@@ -1,0 +1,229 @@
+:root {
+    --bg: #ffffff;
+    --text: #0b1220;
+    --blue: #2f6bff;
+    --border: #d7deea;
+    --cellAlt: #f6f9ff;
+    --bad: #ff3b5c;
+    --good: #10b981;
+}
+
+* {
+    box-sizing: border-box
+}
+
+html,
+body {
+    height: 100%
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+    display: grid;
+    place-items: center;
+}
+
+.app {
+    width: min(680px, 96vw);
+    display: grid;
+    gap: 12px;
+    padding: 16px 0;
+}
+
+.controls {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.btn {
+    border: 1px solid var(--border);
+    background: #fff;
+    color: var(--text);
+    padding: 10px 14px;
+    border-radius: 12px;
+    cursor: pointer;
+    font-weight: 900;
+    transition: transform .08s ease, opacity .15s ease;
+    user-select: none;
+}
+
+.btn:active {
+    transform: translateY(1px) scale(.99)
+}
+
+.btn:disabled {
+    opacity: .55;
+    cursor: not-allowed
+}
+
+.btnBlue {
+    background: var(--blue);
+    border-color: rgba(47, 107, 255, .55);
+    color: #fff;
+}
+
+.fileBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.board {
+    width: min(560px, 94vw);
+    display: grid;
+    grid-template-columns: repeat(9, 1fr);
+    border-radius: 14px;
+    overflow: hidden;
+    border: 2px solid rgba(47, 107, 255, .45);
+    background: #fff;
+}
+
+.cell {
+    aspect-ratio: 1/1;
+    border: 1px solid var(--border);
+    background: #fff;
+    display: grid;
+    place-items: center;
+    position: relative;
+}
+
+.cell.alt {
+    background: var(--cellAlt)
+}
+
+.cell.thickL {
+    border-left: 3px solid rgba(47, 107, 255, .45)
+}
+
+.cell.thickT {
+    border-top: 3px solid rgba(47, 107, 255, .45)
+}
+
+.cell.thickR {
+    border-right: 3px solid rgba(47, 107, 255, .45)
+}
+
+.cell.thickB {
+    border-bottom: 3px solid rgba(47, 107, 255, .45)
+}
+
+.cell input {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    outline: none;
+    background: transparent;
+    text-align: center;
+    font-size: clamp(20px, 4vw, 30px);
+    font-weight: 900;
+    color: var(--text);
+    caret-color: var(--blue);
+}
+
+.cell.active {
+    box-shadow: inset 0 0 0 3px rgba(47, 107, 255, .55);
+    z-index: 2;
+}
+
+/* RED for conflicts */
+.cell.conflict {
+    background: rgba(255, 59, 92, .12)
+}
+
+.cell.conflict input {
+    color: #b90f2f
+}
+
+/* animation marks */
+.cell.working {
+    box-shadow: inset 0 0 0 3px rgba(47, 107, 255, .25)
+}
+
+.cell.guess {
+    background: rgba(47, 107, 255, .10)
+}
+
+.cell.backtrack {
+    background: rgba(255, 59, 92, .10)
+}
+
+/* solved values in GREEN */
+.cell.solved input {
+    color: var(--good);
+    font-weight: 950
+}
+
+/* user numbers (manual/loaded/ocr) */
+.cell.given input {
+    color: var(--text)
+}
+
+/* ===== OCR Modal ===== */
+.modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, .45);
+    display: grid;
+    place-items: center;
+    z-index: 9999;
+    padding: 14px;
+}
+
+.modal[hidden] {
+    display: none
+}
+
+.modalCard {
+    width: min(920px, 96vw);
+    background: #fff;
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    box-shadow: 0 20px 80px rgba(0, 0, 0, .25);
+    overflow: hidden;
+}
+
+.modalTop,
+.modalBottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+}
+
+.modalBottom {
+    border-bottom: 0;
+    border-top: 1px solid var(--border);
+}
+
+.modalTitle {
+    font-weight: 950;
+}
+
+.cropWrap {
+    background: #0b1220;
+    display: grid;
+    place-items: center;
+    padding: 10px;
+}
+
+#ocrCanvas {
+    width: min(880px, 94vw);
+    height: auto;
+    border-radius: 10px;
+    background: #111827;
+    touch-action: none;
+}
+
+.smallNote {
+    font-size: 13px;
+    font-weight: 800;
+    opacity: .75;
+}
