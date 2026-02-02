@@ -156,25 +156,26 @@ window.Solver = (() => {
 
             for (const val of [...cand[cell]]) {
                 step({ type: "guess", i: cell, val });
+
                 const s = clone(grid, cand);
 
                 if (!assign(s.grid, s.cand, cell, val, "guess")) {
-                    step({ type: "unassign", i: cell });
                     step({ type: "backtrack", i: cell, val });
+                    step({ type: "unassign", i: cell });
                     continue;
                 }
+
                 if (!propagate(s.grid, s.cand)) {
-                    step({ type: "unassign", i: cell });
                     step({ type: "backtrack", i: cell, val });
+                    step({ type: "unassign", i: cell });
                     continue;
                 }
 
                 const res = dfs(s.grid, s.cand);
                 if (res) return res;
 
-                // show removal when backtracking
-                step({ type: "unassign", i: cell });
                 step({ type: "backtrack", i: cell, val });
+                step({ type: "unassign", i: cell });
             }
             return null;
         }

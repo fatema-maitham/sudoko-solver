@@ -1,6 +1,13 @@
-// ocr.js (BEST VERSION: OpenCV warp + grid-line removal + Tesseract per cell)
+// ocr.js (FINAL FINAL)
+// Goal: stable + high accuracy OCR for Sudoku photos with light/blue grids.
 // Exposes: window.OCR = { openCropAndRead(file) }
-// Returns: { grid:number[81], uncertain:boolean[81], conf:number[81] }
+//
+// Key upgrades vs basic OCR:
+// - More stable results: 1 worker (deterministic-ish)
+// - Strong preprocessing: grayscale + contrast + percentile threshold
+// - Per-cell cleanup: remove grid lines + clear borders + dilate digits
+// - Multi-variant per cell (A/B/C) and pick best confidence
+// - Sanitizes conflicts by dropping lowest-confidence digits
 
 window.OCR = (() => {
     const modal = () => document.getElementById("ocrModal");
@@ -13,79 +20,47 @@ window.OCR = (() => {
     let viewScale = 1;
     let viewOffX = 0, viewOffY = 0;
 
-    // crop rect in CANVAS coords
+    // crop square in canvas coords
     let rect = { x: 40, y: 40, s: 300 };
     const HANDLE = 12;
+
     let dragMode = null;
     let start = null;
 
-    // ---------- helpers ----------
-    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-    // ---------- wait OpenCV ----------
-    let cvReadyPromise = null;
-    function getCV() {
-        if (cvReadyPromise) return cvReadyPromise;
-        cvReadyPromise = (async () => {
-            // If opencv not included, just return null
-            if (!window.cv) return null;
-
-            // If already initialized
-            if (window.cv && window.cv.Mat) return window.cv;
-
-            // Wait until runtime initialized (opencv.js sets this callback)
-            await new Promise((resolve) => {
-                const t0 = performance.now();
-                const timer = setInterval(() => {
-                    if (window.cv && window.cv.Mat) {
-                        clearInterval(timer);
-                        resolve();
-                    }
-                    // fail-safe: after 6s, resolve anyway (fallback path)
-                    if (performance.now() - t0 > 6000) {
-                        clearInterval(timer);
-                        resolve();
-                    }
-                }, 50);
-            });
-
-            return (window.cv && window.cv.Mat) ? window.cv : null;
-        })();
-        return cvReadyPromise;
-    }
-
-    // ---------- Tesseract scheduler ----------
+    let bound = false;
     let schedulerPromise = null;
+
+    function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
     async function getScheduler() {
         if (!window.Tesseract) throw new Error("OCR needs internet (Tesseract CDN).");
         if (schedulerPromise) return schedulerPromise;
 
         schedulerPromise = (async () => {
             const scheduler = Tesseract.createScheduler();
-            const workerCount = 2;
 
-            for (let i = 0; i < workerCount; i++) {
+            // 1 worker => more stable, less random variability
+            for (let i = 0; i < 1; i++) {
                 const w = await Tesseract.createWorker();
                 await w.loadLanguage("eng");
                 await w.initialize("eng");
                 await w.setParameters({
                     tessedit_char_whitelist: "123456789",
-                    tessedit_pageseg_mode: "10", // single char
-                    tessedit_ocr_engine_mode: "1", // LSTM
+                    // Tesseract v5 param name is "tessedit_pageseg_mode"
+                    tessedit_pageseg_mode: "10", // SINGLE_CHAR
                     classify_bln_numeric_mode: "1",
                     user_defined_dpi: "300",
                     preserve_interword_spaces: "0",
                 });
                 scheduler.addWorker(w);
             }
+
             return scheduler;
         })();
 
         return schedulerPromise;
     }
 
-    // ---------- UI (crop modal) ----------
     function showModal() { modal().hidden = false; }
     function hideModal() { modal().hidden = true; }
 
@@ -107,18 +82,12 @@ window.OCR = (() => {
         return null;
     }
 
-    function toCanvasPoint(e, cv) {
-        const r = cv.getBoundingClientRect();
-        const x = (e.clientX - r.left) * (cv.width / r.width);
-        const y = (e.clientY - r.top) * (cv.height / r.height);
-        return { x, y };
-    }
-
     function draw() {
         const cv = canvasEl();
         const ctx = cv.getContext("2d");
-
         ctx.clearRect(0, 0, cv.width, cv.height);
+
+        // dark background
         ctx.fillStyle = "#0b1220";
         ctx.fillRect(0, 0, cv.width, cv.height);
 
@@ -130,7 +99,7 @@ window.OCR = (() => {
             );
         }
 
-        // dark overlay outside rect
+        // darken outside crop
         ctx.save();
         ctx.fillStyle = "rgba(0,0,0,.45)";
         ctx.beginPath();
@@ -139,7 +108,7 @@ window.OCR = (() => {
         ctx.fill("evenodd");
         ctx.restore();
 
-        // rect border
+        // crop stroke
         ctx.lineWidth = 3;
         ctx.strokeStyle = "rgba(47,107,255,.95)";
         ctx.strokeRect(rect.x, rect.y, rect.s, rect.s);
@@ -162,7 +131,17 @@ window.OCR = (() => {
         }
     }
 
+    function toCanvasPoint(e, cv) {
+        const r = cv.getBoundingClientRect();
+        const x = (e.clientX - r.left) * (cv.width / r.width);
+        const y = (e.clientY - r.top) * (cv.height / r.height);
+        return { x, y };
+    }
+
     function bindCanvasEvents() {
+        if (bound) return;
+        bound = true;
+
         const cv = canvasEl();
 
         cv.onpointerdown = (e) => {
@@ -224,397 +203,13 @@ window.OCR = (() => {
 
             rect.x = clamp(rect.x, 0, cvW - rect.s);
             rect.y = clamp(rect.y, 0, cvH - rect.s);
+
             draw();
         };
 
         cv.onpointerup = () => { dragMode = null; start = null; };
     }
 
-    // ---------- crop math ----------
-    function canvasRectToSourceRect() {
-        const sx = (rect.x - viewOffX) / viewScale;
-        const sy = (rect.y - viewOffY) / viewScale;
-        const ss = rect.s / viewScale;
-
-        const x = clamp(sx, 0, sourceW - 1);
-        const y = clamp(sy, 0, sourceH - 1);
-        const s = clamp(ss, 120, Math.min(sourceW - x, sourceH - y));
-        return { x, y, s };
-    }
-
-    // ---------- OCR utilities ----------
-    function pickBestDigit(data) {
-        // best symbol confidence if available
-        if (Array.isArray(data?.symbols) && data.symbols.length) {
-            let best = { d: 0, conf: -1 };
-            for (const s of data.symbols) {
-                const ch = (s?.text || "").trim();
-                if (!/^[1-9]$/.test(ch)) continue;
-                const cf = typeof s.confidence === "number" ? s.confidence : 0;
-                if (cf > best.conf) best = { d: Number(ch), conf: cf };
-            }
-            if (best.conf >= 0) return best;
-        }
-        const txt = String(data?.text || "").replace(/\s/g, "");
-        const m = txt.match(/[1-9]/);
-        const cf = typeof data?.confidence === "number" ? data.confidence : 0;
-        return { d: m ? Number(m[0]) : 0, conf: cf };
-    }
-
-    // Sudoku conflicts helper (auto clear weak OCR digits)
-    function validateConflicts(grid) {
-        const conflicts = new Set();
-        const idx = (r, c) => r * 9 + c;
-        const units = [];
-
-        for (let r = 0; r < 9; r++) units.push(Array.from({ length: 9 }, (_, c) => idx(r, c)));
-        for (let c = 0; c < 9; c++) units.push(Array.from({ length: 9 }, (_, r) => idx(r, c)));
-        for (let br = 0; br < 3; br++) for (let bc = 0; bc < 3; bc++) {
-            const box = [];
-            for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) box.push(idx(br * 3 + r, bc * 3 + c));
-            units.push(box);
-        }
-
-        for (const unit of units) {
-            const seen = new Map();
-            for (const i of unit) {
-                const v = grid[i];
-                if (!v) continue;
-                if (seen.has(v)) { conflicts.add(i); conflicts.add(seen.get(v)); }
-                else seen.set(v, i);
-            }
-        }
-        return conflicts;
-    }
-
-    function autoClearConflicts(grid, conf) {
-        const g = grid.slice();
-        const c = conf.slice();
-
-        let loops = 0;
-        while (loops++ < 200) {
-            const conflicts = validateConflicts(g);
-            if (conflicts.size === 0) break;
-
-            let worstI = -1;
-            let worst = 9999;
-
-            for (const i of conflicts) {
-                if (g[i] === 0) continue;
-                const ci = c[i] || 0;
-                if (ci < worst) { worst = ci; worstI = i; }
-            }
-            if (worstI === -1) break;
-
-            g[worstI] = 0;
-            c[worstI] = 0;
-        }
-        return { grid: g, conf: c };
-    }
-
-    async function runWithLimit(tasks, limit) {
-        let next = 0;
-        const workers = Array.from({ length: limit }, async () => {
-            while (true) {
-                const i = next++;
-                if (i >= tasks.length) break;
-                await tasks[i]();
-            }
-        });
-        await Promise.all(workers);
-    }
-
-    // ---------- OpenCV: warp perspective + remove grid lines ----------
-    function orderQuad(pts) {
-        // pts: [{x,y}*4]
-        const sum = pts.map(p => p.x + p.y);
-        const diff = pts.map(p => p.x - p.y);
-
-        const tl = pts[sum.indexOf(Math.min(...sum))];
-        const br = pts[sum.indexOf(Math.max(...sum))];
-        const tr = pts[diff.indexOf(Math.max(...diff))];
-        const bl = pts[diff.indexOf(Math.min(...diff))];
-        return [tl, tr, br, bl];
-    }
-
-    function detectAndWarpGrid(cv, srcCanvas, OUT = 1600) {
-        // returns a canvas OUTxOUT, or null if detection fails
-        const src = cv.imread(srcCanvas);
-        const gray = new cv.Mat();
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-
-        const blur = new cv.Mat();
-        cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
-
-        const bin = new cv.Mat();
-        cv.adaptiveThreshold(
-            blur, bin,
-            255,
-            cv.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv.THRESH_BINARY_INV,
-            31,
-            5
-        );
-
-        // strengthen edges
-        const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-        cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kernel);
-
-        const contours = new cv.MatVector();
-        const hierarchy = new cv.Mat();
-        cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-        let best = null;
-        let bestArea = 0;
-
-        for (let i = 0; i < contours.size(); i++) {
-            const cnt = contours.get(i);
-            const area = cv.contourArea(cnt);
-            if (area < 0.15 * src.rows * src.cols) { cnt.delete(); continue; }
-
-            const peri = cv.arcLength(cnt, true);
-            const approx = new cv.Mat();
-            cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-
-            if (approx.rows === 4 && area > bestArea) {
-                bestArea = area;
-                best = approx.clone();
-            }
-
-            approx.delete();
-            cnt.delete();
-        }
-
-        if (!best) {
-            src.delete(); gray.delete(); blur.delete(); bin.delete(); contours.delete(); hierarchy.delete(); kernel.delete();
-            return null;
-        }
-
-        // extract 4 points
-        const pts = [];
-        for (let i = 0; i < 4; i++) {
-            const x = best.intPtr(i, 0)[0];
-            const y = best.intPtr(i, 0)[1];
-            pts.push({ x, y });
-        }
-        const [tl, tr, br, bl] = orderQuad(pts);
-
-        const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
-            tl.x, tl.y,
-            tr.x, tr.y,
-            br.x, br.y,
-            bl.x, bl.y
-        ]);
-
-        const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
-            0, 0,
-            OUT - 1, 0,
-            OUT - 1, OUT - 1,
-            0, OUT - 1
-        ]);
-
-        const M = cv.getPerspectiveTransform(srcTri, dstTri);
-
-        const warped = new cv.Mat();
-        cv.warpPerspective(src, warped, M, new cv.Size(OUT, OUT), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
-
-        // Now remove grid lines from warped image (helps a lot)
-        const wGray = new cv.Mat();
-        cv.cvtColor(warped, wGray, cv.COLOR_RGBA2GRAY);
-
-        const wBin = new cv.Mat();
-        cv.adaptiveThreshold(wGray, wBin, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 31, 5);
-
-        // horizontal lines
-        const horiz = wBin.clone();
-        const hSize = Math.max(20, Math.floor(OUT / 30));
-        const hKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(hSize, 1));
-        cv.erode(horiz, horiz, hKernel);
-        cv.dilate(horiz, horiz, hKernel);
-
-        // vertical lines
-        const vert = wBin.clone();
-        const vSize = Math.max(20, Math.floor(OUT / 30));
-        const vKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(1, vSize));
-        cv.erode(vert, vert, vKernel);
-        cv.dilate(vert, vert, vKernel);
-
-        const gridLines = new cv.Mat();
-        cv.add(horiz, vert, gridLines);
-
-        // subtract grid lines from wBin (keep only digits)
-        const digitsOnly = new cv.Mat();
-        cv.subtract(wBin, gridLines, digitsOnly);
-
-        // light cleanup
-        const k2 = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(2, 2));
-        cv.morphologyEx(digitsOnly, digitsOnly, cv.MORPH_OPEN, k2);
-
-        // render digitsOnly to a canvas
-        const outCanvas = document.createElement("canvas");
-        outCanvas.width = OUT;
-        outCanvas.height = OUT;
-        cv.imshow(outCanvas, digitsOnly);
-
-        // cleanup mats
-        src.delete(); gray.delete(); blur.delete(); bin.delete();
-        contours.delete(); hierarchy.delete(); kernel.delete();
-        best.delete(); srcTri.delete(); dstTri.delete(); M.delete();
-        warped.delete(); wGray.delete(); wBin.delete();
-        horiz.delete(); vert.delete(); hKernel.delete(); vKernel.delete();
-        gridLines.delete(); digitsOnly.delete(); k2.delete();
-
-        return outCanvas;
-    }
-
-    // ---------- MAIN OCR ----------
-    async function runGridOCR() {
-        const cvLib = await getCV(); // may be null
-        const scheduler = await getScheduler();
-
-        // 1) crop selected region from original image -> working canvas
-        const { x, y, s } = canvasRectToSourceRect();
-
-        const cropCanvas = document.createElement("canvas");
-        cropCanvas.width = 1200;
-        cropCanvas.height = 1200;
-        const cctx = cropCanvas.getContext("2d", { willReadFrequently: true });
-        cctx.imageSmoothingEnabled = true;
-        cctx.imageSmoothingQuality = "high";
-        cctx.drawImage(imgBitmap, x, y, s, s, 0, 0, 1200, 1200);
-
-        // 2) If OpenCV available: warp perspective + remove grid lines
-        // If detection fails: fallback to plain crop
-        const NORM = 1600; // more pixels per cell
-        let gridCanvas = cropCanvas;
-
-        if (cvLib) {
-            const warped = detectAndWarpGrid(cvLib, cropCanvas, NORM);
-            if (warped) gridCanvas = warped;
-        }
-
-        const GRID_SIZE = gridCanvas.width; // either 1200 or 1600
-        const cellSize = GRID_SIZE / 9;
-
-        const grid = new Array(81).fill(0);
-        const conf = new Array(81).fill(0);
-
-        // tuning (safe defaults)
-        const CELL_CANVAS = 520;     // big = better
-        const PAD = Math.max(10, Math.floor(cellSize * 0.08));
-        const ACCEPT = 32;           // stricter = fewer wrong digits (better)
-        const UNCERTAIN_BELOW = 88;  // yellow more often so you can fix fast
-        const RETRY_BELOW = 70;      // try inverted pass if low
-        const CONCURRENCY = 10;
-
-        const tasks = [];
-
-        for (let r = 0; r < 9; r++) {
-            for (let c = 0; c < 9; c++) {
-                const i = r * 9 + c;
-                tasks.push(async () => {
-                    // cell canvas
-                    const cellCv = document.createElement("canvas");
-                    cellCv.width = CELL_CANVAS;
-                    cellCv.height = CELL_CANVAS;
-                    const ctx = cellCv.getContext("2d", { willReadFrequently: true });
-
-                    const sx = Math.round(c * cellSize + PAD);
-                    const sy = Math.round(r * cellSize + PAD);
-                    const sw = Math.round(cellSize - PAD * 2);
-                    const sh = Math.round(cellSize - PAD * 2);
-
-                    ctx.fillStyle = "#fff";
-                    ctx.fillRect(0, 0, CELL_CANVAS, CELL_CANVAS);
-                    ctx.drawImage(gridCanvas, sx, sy, sw, sh, 0, 0, CELL_CANVAS, CELL_CANVAS);
-
-                    // Find ink box quickly (pure JS)
-                    const img = ctx.getImageData(0, 0, CELL_CANVAS, CELL_CANVAS);
-                    const d = img.data;
-
-                    let minX = CELL_CANVAS, minY = CELL_CANVAS, maxX = -1, maxY = -1;
-                    for (let y = 0; y < CELL_CANVAS; y++) {
-                        for (let x = 0; x < CELL_CANVAS; x++) {
-                            const p = (y * CELL_CANVAS + x) * 4;
-                            // treat "dark" as ink
-                            const v = (d[p] + d[p + 1] + d[p + 2]) / 3;
-                            if (v < 200) {
-                                if (x < minX) minX = x;
-                                if (y < minY) minY = y;
-                                if (x > maxX) maxX = x;
-                                if (y > maxY) maxY = y;
-                            }
-                        }
-                    }
-                    if (maxX < 0) { grid[i] = 0; conf[i] = 0; return; }
-
-                    // center the tight box onto a clean white canvas
-                    const tightCv = document.createElement("canvas");
-                    tightCv.width = CELL_CANVAS;
-                    tightCv.height = CELL_CANVAS;
-                    const tctx = tightCv.getContext("2d", { willReadFrequently: true });
-                    tctx.fillStyle = "#fff";
-                    tctx.fillRect(0, 0, CELL_CANVAS, CELL_CANVAS);
-
-                    const bw = maxX - minX + 1;
-                    const bh = maxY - minY + 1;
-
-                    const scale = Math.min((CELL_CANVAS * 0.78) / bw, (CELL_CANVAS * 0.78) / bh);
-                    const dw = bw * scale;
-                    const dh = bh * scale;
-                    const dx = (CELL_CANVAS - dw) / 2;
-                    const dy = (CELL_CANVAS - dh) / 2;
-
-                    tctx.drawImage(cellCv, minX, minY, bw, bh, dx, dy, dw, dh);
-
-                    // OCR pass 1
-                    const out1 = await scheduler.addJob("recognize", tightCv);
-                    let best = pickBestDigit(out1.data);
-
-                    // OCR pass 2 (invert) if low confidence
-                    if (best.conf > 0 && best.conf < RETRY_BELOW) {
-                        const inv = document.createElement("canvas");
-                        inv.width = CELL_CANVAS;
-                        inv.height = CELL_CANVAS;
-                        const ictx = inv.getContext("2d", { willReadFrequently: true });
-                        ictx.drawImage(tightCv, 0, 0);
-                        const im = ictx.getImageData(0, 0, CELL_CANVAS, CELL_CANVAS);
-                        const id = im.data;
-                        for (let k = 0; k < id.length; k += 4) {
-                            id[k] = 255 - id[k];
-                            id[k + 1] = 255 - id[k + 1];
-                            id[k + 2] = 255 - id[k + 2];
-                            id[k + 3] = 255;
-                        }
-                        ictx.putImageData(im, 0, 0);
-                        const out2 = await scheduler.addJob("recognize", inv);
-                        const retry = pickBestDigit(out2.data);
-                        if ((retry.conf || 0) > (best.conf || 0)) best = retry;
-                    }
-
-                    if (best.d && best.conf >= ACCEPT) {
-                        grid[i] = best.d;
-                        conf[i] = best.conf;
-                    } else {
-                        grid[i] = 0;
-                        conf[i] = best.conf || 0;
-                    }
-                });
-            }
-        }
-
-        await runWithLimit(tasks, CONCURRENCY);
-
-        // Auto-clear conflicts (removes weakest digits if OCR made duplicates)
-        const fixed = autoClearConflicts(grid, conf);
-
-        // Uncertain highlight (strong)
-        const uncertain = fixed.grid.map((v, i) => v !== 0 && (fixed.conf[i] || 0) < UNCERTAIN_BELOW);
-
-        return { grid: fixed.grid, uncertain, conf: fixed.conf };
-    }
-
-    // ---------- public ----------
     async function openCropAndRead(file) {
         imgBitmap = await createImageBitmap(file);
         sourceW = imgBitmap.width;
@@ -628,10 +223,11 @@ window.OCR = (() => {
         cv.height = Math.round((cssW * aspect) * devicePixelRatio);
 
         const cvW = cv.width, cvH = cv.height;
-        viewScale = Math.min(cvW / sourceW, cvH / sourceH);
+        const scale = Math.min(cvW / sourceW, cvH / sourceH);
+        viewScale = scale;
 
-        const drawnW = sourceW * viewScale;
-        const drawnH = sourceH * viewScale;
+        const drawnW = sourceW * scale;
+        const drawnH = sourceH * scale;
         viewOffX = (cvW - drawnW) / 2;
         viewOffY = (cvH - drawnH) / 2;
 
@@ -639,7 +235,7 @@ window.OCR = (() => {
         rect = {
             s: Math.max(260, Math.round(s)),
             x: Math.round(viewOffX + (drawnW - s) / 2),
-            y: Math.round(viewOffY + (drawnH - s) / 2)
+            y: Math.round(viewOffY + (drawnH - s) / 2),
         };
 
         showModal();
@@ -647,45 +243,328 @@ window.OCR = (() => {
         bindCanvasEvents();
 
         return await new Promise((resolve, reject) => {
-            const useBtn = btnUse();
-            const closeBtn = btnClose();
-            const m = modal();
-
-            const outsideClick = (e) => { if (e.target === m) cancel(); };
-
-            const cancel = () => {
-                cleanup();
-                reject(new Error("OCR canceled"));
-            };
+            const onCancel = () => { cleanup(); reject(new Error("OCR canceled")); };
 
             const onUse = async () => {
                 try {
-                    useBtn.disabled = true;
-                    useBtn.textContent = "Reading...";
-                    const result = await runGridOCR();
+                    btnUse().disabled = true;
+                    btnUse().textContent = "Reading...";
+                    await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+
+                    const grid = await runCellOCR();
                     cleanup();
-                    resolve(result);
+                    resolve(grid);
                 } catch (e) {
                     cleanup();
                     reject(e);
                 }
             };
 
-            const cleanup = () => {
-                useBtn.disabled = false;
-                useBtn.textContent = "Use Crop";
-                useBtn.onclick = null;
-                closeBtn.onclick = null;
-                m.removeEventListener("click", outsideClick);
+            function cleanup() {
+                btnUse().disabled = false;
+                btnUse().textContent = "Use Crop";
+                btnUse().removeEventListener("click", onUse);
+                btnClose().removeEventListener("click", onCancel);
+                modal().removeEventListener("click", outsideClick);
                 hideModal();
-            };
+            }
 
-            // IMPORTANT: use onclick (overwrites old handler, avoids duplicates)
-            useBtn.onclick = onUse;
-            closeBtn.onclick = cancel;
-            m.addEventListener("click", outsideClick);
+            function outsideClick(e) { if (e.target === modal()) onCancel(); }
+
+            btnUse().addEventListener("click", onUse);
+            btnClose().addEventListener("click", onCancel);
+            modal().addEventListener("click", outsideClick);
         });
+    }
 
+    function canvasRectToSourceRect() {
+        const sx = (rect.x - viewOffX) / viewScale;
+        const sy = (rect.y - viewOffY) / viewScale;
+        const ss = rect.s / viewScale;
+
+        const x = clamp(sx, 0, sourceW - 1);
+        const y = clamp(sy, 0, sourceH - 1);
+        const s = clamp(ss, 100, Math.min(sourceW - x, sourceH - y));
+        return { x, y, s };
+    }
+
+    // ===== Image helpers =====
+
+    function grayscale(imgData) {
+        const d = imgData.data;
+        for (let i = 0; i < d.length; i += 4) {
+            const r = d[i], g = d[i + 1], b = d[i + 2];
+            const gray = r * 0.299 + g * 0.587 + b * 0.114;
+            d[i] = d[i + 1] = d[i + 2] = gray;
+            d[i + 3] = 255;
+        }
+    }
+
+    function autoContrast(imgData) {
+        const d = imgData.data;
+        let min = 255, max = 0;
+        for (let i = 0; i < d.length; i += 4) {
+            const v = d[i];
+            if (v < min) min = v;
+            if (v > max) max = v;
+        }
+        const range = Math.max(1, max - min);
+        for (let i = 0; i < d.length; i += 4) {
+            const v = (d[i] - min) * (255 / range);
+            d[i] = d[i + 1] = d[i + 2] = v;
+        }
+    }
+
+    function threshold(imgData, t) {
+        const d = imgData.data;
+        for (let i = 0; i < d.length; i += 4) {
+            const v = d[i] > t ? 255 : 0;
+            d[i] = d[i + 1] = d[i + 2] = v;
+            d[i + 3] = 255;
+        }
+    }
+
+    function invert(imgData) {
+        const d = imgData.data;
+        for (let i = 0; i < d.length; i += 4) {
+            const v = 255 - d[i];
+            d[i] = d[i + 1] = d[i + 2] = v;
+        }
+    }
+
+    // Percentile threshold: better for "mostly white + light-blue grid"
+    function percentileThreshold(imgData) {
+        const d = imgData.data;
+        const vals = [];
+        for (let i = 0; i < d.length; i += 4 * 6) vals.push(d[i]); // sample
+        vals.sort((a, b) => a - b);
+
+        const p5 = vals[Math.floor(vals.length * 0.05)];
+        const p12 = vals[Math.floor(vals.length * 0.12)];
+        let t = Math.round((p5 + p12) / 2);
+        t = clamp(t, 115, 175);
+        return t;
+    }
+
+    function dilateBinary(imgData, w, h, iters = 1) {
+        const d = imgData.data;
+        const copy = new Uint8ClampedArray(d.length);
+
+        for (let iter = 0; iter < iters; iter++) {
+            copy.set(d);
+            const isBlack = (p) => copy[p] < 128;
+
+            for (let y = 1; y < h - 1; y++) {
+                for (let x = 1; x < w - 1; x++) {
+                    const p = (y * w + x) * 4;
+                    if (isBlack(p)) continue;
+
+                    let nearBlack = false;
+                    for (let dy = -1; dy <= 1 && !nearBlack; dy++) {
+                        for (let dx = -1; dx <= 1; dx++) {
+                            const q = ((y + dy) * w + (x + dx)) * 4;
+                            if (isBlack(q)) { nearBlack = true; break; }
+                        }
+                    }
+                    if (nearBlack) d[p] = d[p + 1] = d[p + 2] = 0;
+                }
+            }
+        }
+    }
+
+    function isMostlyEmpty(imgData) {
+        const d = imgData.data;
+        let black = 0;
+        const total = d.length / 4;
+        for (let i = 0; i < d.length; i += 4) if (d[i] < 128) black++;
+        return (black / total) < 0.010;
+    }
+
+    // BIG accuracy boost: remove grid lines and clear borders (per cell)
+    function removeGridLines(imgData, w, h) {
+        const d = imgData.data;
+        const isBlack = (x, y) => d[(y * w + x) * 4] < 128;
+        const setWhite = (x, y) => {
+            const p = (y * w + x) * 4;
+            d[p] = d[p + 1] = d[p + 2] = 255;
+            d[p + 3] = 255;
+        };
+
+        // remove horizontal lines
+        for (let y = 0; y < h; y++) {
+            let black = 0;
+            for (let x = 0; x < w; x++) if (isBlack(x, y)) black++;
+            if (black > w * 0.70) {
+                for (let x = 0; x < w; x++) setWhite(x, y);
+            }
+        }
+
+        // remove vertical lines
+        for (let x = 0; x < w; x++) {
+            let black = 0;
+            for (let y = 0; y < h; y++) if (isBlack(x, y)) black++;
+            if (black > h * 0.70) {
+                for (let y = 0; y < h; y++) setWhite(x, y);
+            }
+        }
+
+        // clear border (kills edge grid)
+        const border = Math.max(2, Math.floor(Math.min(w, h) * 0.04));
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                if (x < border || x >= w - border || y < border || y >= h - border) {
+                    setWhite(x, y);
+                }
+            }
+        }
+    }
+
+    function pickBestDigit(out) {
+        const data = out?.data;
+
+        // symbols is best when available
+        if (Array.isArray(data?.symbols) && data.symbols.length) {
+            let best = { d: 0, conf: -1 };
+            for (const s of data.symbols) {
+                const ch = (s?.text || "").trim();
+                if (!/^[1-9]$/.test(ch)) continue;
+                const conf = typeof s.confidence === "number" ? s.confidence : 0;
+                if (conf > best.conf) best = { d: Number(ch), conf };
+            }
+            if (best.conf >= 0) return best;
+        }
+
+        // fallback
+        const txt = String(data?.text || "").replace(/\s/g, "");
+        const m = txt.match(/[1-9]/);
+        const conf = typeof data?.confidence === "number" ? data.confidence : 0;
+        return { d: m ? Number(m[0]) : 0, conf };
+    }
+
+    function sanitizeConflicts(grid, conf) {
+        if (!window.Solver?.validate) return grid;
+
+        const g = grid.slice();
+        for (let safety = 0; safety < 60; safety++) {
+            const v = window.Solver.validate(g);
+            if (v.ok) return g;
+
+            const conflicted = [...v.conflicts];
+            if (!conflicted.length) return g;
+
+            conflicted.sort((a, b) => (conf[a] ?? 0) - (conf[b] ?? 0));
+            const kill = conflicted[0];
+            g[kill] = 0;
+            conf[kill] = -1;
+        }
+        return g;
+    }
+
+    async function runCellOCR() {
+        const { x, y, s } = canvasRectToSourceRect();
+
+        // normalize grid to fixed resolution
+        const gridCv = document.createElement("canvas");
+        gridCv.width = 1080;
+        gridCv.height = 1080;
+
+        const gctx = gridCv.getContext("2d", { willReadFrequently: true });
+        gctx.drawImage(imgBitmap, x, y, s, s, 0, 0, 1080, 1080);
+
+        // preprocess whole grid
+        const gridData = gctx.getImageData(0, 0, 1080, 1080);
+        grayscale(gridData);
+        autoContrast(gridData);
+
+        const Tg = percentileThreshold(gridData);
+        threshold(gridData, Tg);
+        gctx.putImageData(gridData, 0, 0);
+
+        const scheduler = await getScheduler();
+        const grid = new Array(81).fill(0);
+        const conf = new Array(81).fill(0);
+
+        const cellSize = 1080 / 9;
+        const pad = 22; // slightly bigger to avoid grid intersections
+
+        const cellCv = document.createElement("canvas");
+        cellCv.width = 240;
+        cellCv.height = 240;
+        const cctx = cellCv.getContext("2d", { willReadFrequently: true });
+
+        async function recognizeBestFromCanvas(cv) {
+            const out = await scheduler.addJob("recognize", cv);
+            return pickBestDigit(out);
+        }
+
+        for (let r = 0; r < 9; r++) {
+            for (let c = 0; c < 9; c++) {
+                const i = r * 9 + c;
+
+                const cx = Math.round(c * cellSize + pad);
+                const cy = Math.round(r * cellSize + pad);
+                const cw = Math.round(cellSize - pad * 2);
+                const ch = Math.round(cellSize - pad * 2);
+
+                cctx.clearRect(0, 0, cellCv.width, cellCv.height);
+                cctx.drawImage(gridCv, cx, cy, cw, ch, 0, 0, cellCv.width, cellCv.height);
+
+                // per-cell adaptive threshold
+                const base = cctx.getImageData(0, 0, cellCv.width, cellCv.height);
+                grayscale(base);
+                autoContrast(base);
+
+                const Tc = percentileThreshold(base);
+                threshold(base, Tc);
+
+                // remove grid lines BEFORE empty check
+                removeGridLines(base, cellCv.width, cellCv.height);
+
+                if (isMostlyEmpty(base)) {
+                    grid[i] = 0;
+                    conf[i] = 0;
+                    continue;
+                }
+
+                // A: base
+                dilateBinary(base, cellCv.width, cellCv.height, 1);
+                cctx.putImageData(base, 0, 0);
+                const bestA = await recognizeBestFromCanvas(cellCv);
+
+                // B: slightly lower threshold (helps faint digits)
+                const b = cctx.getImageData(0, 0, cellCv.width, cellCv.height);
+                b.data.set(base.data);
+                threshold(b, clamp(Tc - 12, 95, 190));
+                removeGridLines(b, cellCv.width, cellCv.height);
+                dilateBinary(b, cellCv.width, cellCv.height, 1);
+                cctx.putImageData(b, 0, 0);
+                const bestB = await recognizeBestFromCanvas(cellCv);
+
+                // C: inverted
+                const cimg = cctx.getImageData(0, 0, cellCv.width, cellCv.height);
+                cimg.data.set(base.data);
+                invert(cimg);
+                removeGridLines(cimg, cellCv.width, cellCv.height);
+                cctx.putImageData(cimg, 0, 0);
+                const bestC = await recognizeBestFromCanvas(cellCv);
+
+                // pick best confidence
+                let best = bestA;
+                if (bestB.conf > best.conf) best = bestB;
+                if (bestC.conf > best.conf) best = bestC;
+
+                // confidence cutoff
+                if (best.d && best.conf >= 55) {
+                    grid[i] = best.d;
+                    conf[i] = best.conf;
+                } else {
+                    grid[i] = 0;
+                    conf[i] = best.conf || 0;
+                }
+            }
+        }
+
+        return sanitizeConflicts(grid, conf);
     }
 
     return { openCropAndRead };
